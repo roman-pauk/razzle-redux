@@ -6,72 +6,90 @@ import { renderToString } from 'react-dom/server';
 import { Provider } from 'react-redux';
 import configureStore from './store'
 import serialize from 'serialize-javascript';
+import config from '../config'
+import { ApolloProvider, getDataFromTree } from 'react-apollo';
+import { HttpLink } from 'apollo-link-http';
+import { ApolloClient } from 'apollo-client';
+import fetch from 'node-fetch';
+import { InMemoryCache } from 'apollo-cache-inmemory';
 
+const uri = config.apollo.networkInterface
 const assets = require(process.env.RAZZLE_ASSETS_MANIFEST);
 
 const server = express();
 server
-  .disable('x-powered-by')
-  .use(express.static(process.env.RAZZLE_PUBLIC_DIR))
-  .get('/*', async (req, res) => {
-        let context = {data: {remote: {}}, req};
-        const store = configureStore(context.data);
+    .disable('x-powered-by')
+    .use(express.static(process.env.RAZZLE_PUBLIC_DIR))
+    .get('/*', async (req, res) => {
 
-        renderToString(
-        <Provider store={store}>
-            <StaticRouter context={context} location={req.url}>
-                <App />
-            </StaticRouter>
-        </Provider>
+        const location = req.url;
+        const apolloClient = new ApolloClient({
+            ssrMode: true,
+            link: new HttpLink({ uri, fetch }),
+            cache: new InMemoryCache(),
+        });
+        const context = {};
+        let store = configureStore();
+
+
+        const InitialView = (
+            <Provider store={store}>
+                <ApolloProvider store={store} client={apolloClient}>
+                    <StaticRouter location={location} context={context}>
+                        <App />
+                    </StaticRouter>
+                </ApolloProvider>
+            </Provider>
         );
 
-        const keys = Object.keys(context.data.remote);
-        const promises = keys.map(k=>context.data.remote[k]);
-        Promise.all([...promises]).then((results)=>{
-            const newData = {remote: Object.assign({}, ...results.map((resp, t) => {return { [keys[t]]: resp }}))};
-            const stores = configureStore(newData);
-            let markup = renderToString(
-        <Provider store={stores}>
-          <StaticRouter context={context} location={req.url}>
-            <App />
-          </StaticRouter>
-        </Provider>
-      );
+        await getDataFromTree(InitialView);
 
-      const finalState = store.getState();
+        let html = ''
 
-    if (context.url) {
-      res.redirect(context.url);
-    } else {
-      res.status(200).send(
-        `<!doctype html>
-    <html lang="">
-    <head>
-        <meta http-equiv="X-UA-Compatible" content="IE=edge" />
-        <meta charset="utf-8" />
-        <title>seobul</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        ${
-          assets.client.css
-            ? `<link rel="stylesheet" href="${assets.client.css}">`
-            : ''
+        try {
+            html = renderToString(InitialView)
+        } catch (error) {
+            console.log('server rendering error: ', error);
+            throw error;
         }
-        ${
-          process.env.NODE_ENV === 'production'
-            ? `<script src="${assets.client.js}" defer></script>`
-            : `<script src="${assets.client.js}" defer crossorigin></script>`
+
+        if (context.url) {
+            res.redirect(context.url);
+            return
         }
-    </head>
-    <body>
-        <div id="root">${markup}</div>
-        <script>
-          window.__PRELOADED_STATE__ = ${serialize(finalState)}
-        </script>
-    </body>
-</html>`
-      );
-    }
-}).catch(err => console.log(err));
-});
+
+        const preloadedState = serialize(store.getState());
+        const preloadedApolloState = serialize(apolloClient.extract());
+
+        return res
+            .status(200)
+            .set('content-type', 'text/html')
+            .send(
+                `<!doctype html>
+                <html lang="">
+                <head>
+                    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+                    <meta charset="utf-8" />
+                    <title>seobul</title>
+                    <meta name="viewport" content="width=device-width, initial-scale=1">
+                    ${
+                            assets.client.css
+                                ? `<link rel="stylesheet" href="${assets.client.css}">`
+                                : ''
+                            }
+                </head>
+                <body>
+                    <div id="root">${html}</div>
+                    <script type="text/javascript">window.__PRELOADED_STATE__ = ${preloadedState}</script>
+                    <script type="text/javascript">window.__APOLLO_STATE__ = ${preloadedApolloState}</script>
+                    ${
+                            process.env.NODE_ENV === 'production'
+                                ? `<script src="${assets.client.js}" defer></script>`
+                                : `<script src="${assets.client.js}" defer crossorigin></script>`
+                            }
+                </body>
+            </html>`
+            );
+    });
 
 export default server;
